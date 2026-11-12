@@ -41,101 +41,85 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer cython==0.29.36
 
-      - name: Patch Python-for-Android for Android grp compatibility
+      - name: Prepare patched CPython source
         run: |
+          set -e
+
+          git clone \
+            --depth 1 \
+            --branch v3.12.9 \
+            https://github.com/python/cpython.git \
+            "$RUNNER_TEMP/cpython-3.12.9"
+
           python - <<'PY'
           from pathlib import Path
-          import pythonforandroid.recipes.python3 as python3_recipe
+          import re
 
-          recipe_file = Path(python3_recipe.__file__)
-          recipe = recipe_file.read_text(encoding="utf-8")
+          source_file = Path(
+              "/home/runner/work/_temp/cpython-3.12.9/Modules/grpmodule.c"
+          )
 
-          marker = "        with current_directory(build_dir):"
+          source = source_file.read_text(encoding="utf-8")
 
-          if "PLANT_SURVEY_ANDROID_GRP_WORKAROUND" not in recipe:
+          if "PLANT_SURVEY_ANDROID_GRP_WORKAROUND" in source:
+              print("CPython workaround already applied.")
+          else:
+              start = source.index("grp_getgrall_impl")
+              body_start = source.index("{", start)
+              body_end = source.index(
+                  "\n}\n\nstatic PyMethodDef grp_methods",
+                  body_start
+              )
 
-              patch = r'''
-                  # PLANT_SURVEY_ANDROID_GRP_WORKAROUND
-                  # Patch CPython after its source has been downloaded,
-                  # but before its Android compilation begins.
+              body = source[body_start + 1:body_end]
 
-                  grpmodule = join(recipe_build_dir, 'Modules', 'grpmodule.c')
+              pattern = re.compile(
+                  r"(?P<code>\s*setgrent\(\);.*?"
+                  r"endgrent\(\);\s*return d;)",
+                  re.DOTALL
+              )
 
-                  if not exists(grpmodule):
-                      raise BuildInterruptingException(
-                          "Could not locate CPython Modules/grpmodule.c"
-                      )
+              match = pattern.search(body)
 
-                  with open(grpmodule, 'r', encoding='utf-8') as f:
-                      source = f.read()
-
-                  old = (
-                      "    if ((d = PyList_New(0)) == NULL)\n"
-                      "        return NULL;\n"
-                      "    setgrent();\n"
-                      "    while ((p = getgrent()) != NULL) {\n"
-                      "        PyObject *v = mkgrent(module, p);\n"
-                      "        if (v == NULL || PyList_Append(d, v) != 0) {\n"
-                      "            Py_XDECREF(v);\n"
-                      "            Py_DECREF(d);\n"
-                      "            endgrent();\n"
-                      "            return NULL;\n"
-                      "        }\n"
-                      "        Py_DECREF(v);\n"
-                      "    }\n"
-                      "    endgrent();\n"
-                      "    return d;\n"
-                  )
-
-                  new = (
-                      "    if ((d = PyList_New(0)) == NULL)\n"
-                      "        return NULL;\n"
-                      "#ifdef __ANDROID__\n"
-                      "    /* PLANT_SURVEY_ANDROID_GRP_WORKAROUND */\n"
-                      "    /* Android Bionic does not provide getgrent(). */\n"
-                      "    return d;\n"
-                      "#else\n"
-                      "    setgrent();\n"
-                      "    while ((p = getgrent()) != NULL) {\n"
-                      "        PyObject *v = mkgrent(module, p);\n"
-                      "        if (v == NULL || PyList_Append(d, v) != 0) {\n"
-                      "            Py_XDECREF(v);\n"
-                      "            Py_DECREF(d);\n"
-                      "            endgrent();\n"
-                      "            return NULL;\n"
-                      "        }\n"
-                      "        Py_DECREF(v);\n"
-                      "    }\n"
-                      "    endgrent();\n"
-                      "    return d;\n"
-                      "#endif\n"
-                  )
-
-                  if old not in source:
-                      if "PLANT_SURVEY_ANDROID_GRP_WORKAROUND" not in source:
-                          raise BuildInterruptingException(
-                              "Could not find expected CPython grp source block."
-                          )
-                  else:
-                      source = source.replace(old, new, 1)
-
-                      with open(grpmodule, 'w', encoding='utf-8') as f:
-                          f.write(source)
-
-                      info("Successfully patched CPython grp module for Android.")
-              '''
-
-              if marker not in recipe:
+              if not match:
                   raise RuntimeError(
-                      "Could not find the expected Python-for-Android build hook."
+                      "Could not locate grp.getgrall native functions. "
+                      "CPython source layout differs from expected."
                   )
 
-              recipe = recipe.replace(marker, patch + "\n" + marker, 1)
-              recipe_file.write_text(recipe, encoding="utf-8")
+              original_code = match.group("code")
 
-          print("Python-for-Android workaround installed.")
-          print("Patched recipe:", recipe_file)
+              replacement = (
+                  "\n#ifdef __ANDROID__\n"
+                  "    /* PLANT_SURVEY_ANDROID_GRP_WORKAROUND */\n"
+                  "    /* Android Bionic lacks getgrent/setgrent. */\n"
+                  "    return d;\n"
+                  "#else\n"
+                  + original_code +
+                  "\n#endif\n"
+              )
+
+              body = (
+                  body[:match.start()]
+                  + replacement
+                  + body[match.end():]
+              )
+
+              source = (
+                  source[:body_start + 1]
+                  + body
+                  + source[body_end:]
+              )
+
+              source_file.write_text(source, encoding="utf-8")
+
+              print("Successfully patched CPython grp module.")
+
+          print("Verified patch:")
+          assert "PLANT_SURVEY_ANDROID_GRP_WORKAROUND" in source
           PY
+
+          echo "P4A_python3_DIR=$RUNNER_TEMP/cpython-3.12.9" >> "$GITHUB_ENV"
 
       - name: Initialize Buildozer
         run: |
@@ -196,7 +180,13 @@ jobs:
 
       - name: Verify configuration
         run: |
+          echo "Checking Buildozer configuration..."
           grep -E 'requirements =|p4a.branch|android.accept_sdk_license|android.api =|android.minapi =|android.ndk_api =' buildozer.spec
+
+          echo "Checking CPython workaround..."
+          test -f "$P4A_python3_DIR/Modules/grpmodule.c"
+          grep -n "PLANT_SURVEY_ANDROID_GRP_WORKAROUND" \
+            "$P4A_python3_DIR/Modules/grpmodule.c"
 
       - name: Clean previous Android build
         run: |
