@@ -26,15 +26,15 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             git zip unzip \
-            build-essential autoconf libtool pkg-config \
+            build-essential autoconf automake \
+            libtool libltdl-dev pkg-config \
             zlib1g-dev libncurses5-dev libncursesw5-dev \
-            libtinfo6 cmake libffi-dev libssl-dev \
-            automake libltdl-dev
+            libtinfo6 cmake libffi-dev libssl-dev
 
       - name: Install Buildozer
         run: |
@@ -42,10 +42,9 @@ jobs:
           pip install buildozer cython==0.29.36
 
       - name: Initialize Buildozer
-        run: |
-          buildozer init
+        run: buildozer init
 
-      - name: Configure Android application
+      - name: Configure application
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -56,49 +55,60 @@ jobs:
 
           start = content.index("[app]")
           end = content.find("\n[", start + 1)
-
           if end == -1:
               end = len(content)
 
-          app_section = content[start:end]
+          section = content[start:end]
+
           settings = {
               "title": "Plant Maintenance Survey",
               "package.name": "plantsurvey",
               "package.domain": "org.ruet",
+              "source.dir": ".",
               "source.include_exts": "py,kv,png,jpg,atlas,db",
               "requirements": "python3,kivy==2.3.1,openpyxl==3.1.5",
               "orientation": "portrait",
               "android.accept_sdk_license": "True",
               "android.api": "33",
               "android.minapi": "23",
+              "android.ndk": "25b",
+              "android.ndk_api": "23",
               "android.archs": "arm64-v8a",
+              "log_level": "2",
           }
 
           for key, value in settings.items():
               pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*$"
               replacement = f"{key} = {value}"
 
-              if re.search(pattern, app_section):
-                  app_section = re.sub(pattern, replacement, app_section, count=1)
+              if re.search(pattern, section):
+                  section = re.sub(pattern, replacement, section, count=1)
               else:
-                  app_section += f"\n{replacement}"
+                  section += f"\n{replacement}"
 
-          content = content[:start] + app_section + content[end:]
-          path.write_text(content)
-
-          print("Buildozer configuration:")
-          print(app_section)
+          path.write_text(content[:start] + section + content[end:])
+          print(section)
           PY
 
-      - name: Verify SDK license configuration
+      - name: Verify configuration
         run: |
-          grep -n "android.accept_sdk_license" buildozer.spec
+          grep -E 'android.accept_sdk_license|android.ndk =|android.api =|android.archs =|log_level =' buildozer.spec
 
-      - name: Build Android APK
+      - name: Build APK
         run: |
-          buildozer -v android debug
+          buildozer -v android debug 2>&1 | tee build.log
+        shell: bash
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build-log
+          path: build.log
+          if-no-files-found: ignore
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: plant-survey-apk
