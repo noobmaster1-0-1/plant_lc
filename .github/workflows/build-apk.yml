@@ -41,6 +41,102 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer cython==0.29.36
 
+      - name: Patch Python-for-Android for Android grp compatibility
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pythonforandroid.recipes.python3 as python3_recipe
+
+          recipe_file = Path(python3_recipe.__file__)
+          recipe = recipe_file.read_text(encoding="utf-8")
+
+          marker = "        with current_directory(build_dir):"
+
+          if "PLANT_SURVEY_ANDROID_GRP_WORKAROUND" not in recipe:
+
+              patch = r'''
+                  # PLANT_SURVEY_ANDROID_GRP_WORKAROUND
+                  # Patch CPython after its source has been downloaded,
+                  # but before its Android compilation begins.
+
+                  grpmodule = join(recipe_build_dir, 'Modules', 'grpmodule.c')
+
+                  if not exists(grpmodule):
+                      raise BuildInterruptingException(
+                          "Could not locate CPython Modules/grpmodule.c"
+                      )
+
+                  with open(grpmodule, 'r', encoding='utf-8') as f:
+                      source = f.read()
+
+                  old = (
+                      "    if ((d = PyList_New(0)) == NULL)\n"
+                      "        return NULL;\n"
+                      "    setgrent();\n"
+                      "    while ((p = getgrent()) != NULL) {\n"
+                      "        PyObject *v = mkgrent(module, p);\n"
+                      "        if (v == NULL || PyList_Append(d, v) != 0) {\n"
+                      "            Py_XDECREF(v);\n"
+                      "            Py_DECREF(d);\n"
+                      "            endgrent();\n"
+                      "            return NULL;\n"
+                      "        }\n"
+                      "        Py_DECREF(v);\n"
+                      "    }\n"
+                      "    endgrent();\n"
+                      "    return d;\n"
+                  )
+
+                  new = (
+                      "    if ((d = PyList_New(0)) == NULL)\n"
+                      "        return NULL;\n"
+                      "#ifdef __ANDROID__\n"
+                      "    /* PLANT_SURVEY_ANDROID_GRP_WORKAROUND */\n"
+                      "    /* Android Bionic does not provide getgrent(). */\n"
+                      "    return d;\n"
+                      "#else\n"
+                      "    setgrent();\n"
+                      "    while ((p = getgrent()) != NULL) {\n"
+                      "        PyObject *v = mkgrent(module, p);\n"
+                      "        if (v == NULL || PyList_Append(d, v) != 0) {\n"
+                      "            Py_XDECREF(v);\n"
+                      "            Py_DECREF(d);\n"
+                      "            endgrent();\n"
+                      "            return NULL;\n"
+                      "        }\n"
+                      "        Py_DECREF(v);\n"
+                      "    }\n"
+                      "    endgrent();\n"
+                      "    return d;\n"
+                      "#endif\n"
+                  )
+
+                  if old not in source:
+                      if "PLANT_SURVEY_ANDROID_GRP_WORKAROUND" not in source:
+                          raise BuildInterruptingException(
+                              "Could not find expected CPython grp source block."
+                          )
+                  else:
+                      source = source.replace(old, new, 1)
+
+                      with open(grpmodule, 'w', encoding='utf-8') as f:
+                          f.write(source)
+
+                      info("Successfully patched CPython grp module for Android.")
+              '''
+
+              if marker not in recipe:
+                  raise RuntimeError(
+                      "Could not find the expected Python-for-Android build hook."
+                  )
+
+              recipe = recipe.replace(marker, patch + "\n" + marker, 1)
+              recipe_file.write_text(recipe, encoding="utf-8")
+
+          print("Python-for-Android workaround installed.")
+          print("Patched recipe:", recipe_file)
+          PY
+
       - name: Initialize Buildozer
         run: |
           buildozer init
@@ -85,7 +181,9 @@ jobs:
               replacement = f"{key} = {value}"
 
               if re.search(pattern, section):
-                  section = re.sub(pattern, replacement, section, count=1)
+                  section = re.sub(
+                      pattern, replacement, section, count=1
+                  )
               else:
                   section += f"\n{replacement}"
 
