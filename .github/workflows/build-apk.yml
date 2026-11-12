@@ -31,41 +31,74 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             git zip unzip \
-            build-essential \
-            autoconf libtool pkg-config \
+            build-essential autoconf libtool pkg-config \
             zlib1g-dev libncurses5-dev libncursesw5-dev \
-            libtinfo6 cmake libffi-dev libssl-dev
+            libtinfo6 cmake libffi-dev libssl-dev \
+            automake libltdl-dev
 
       - name: Install Buildozer
         run: |
           python -m pip install --upgrade pip
           pip install buildozer cython==0.29.36
 
-      - name: Create Buildozer configuration
+      - name: Initialize Buildozer
         run: |
           buildozer init
 
-          sed -i 's/^title = .*/title = Plant Maintenance Survey/' buildozer.spec
-          sed -i 's/^package.name = .*/package.name = plantsurvey/' buildozer.spec
-          sed -i 's/^package.domain = .*/package.domain = org.ruet/' buildozer.spec
+      - name: Configure Android application
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
 
-          sed -i 's/^source.include_exts = .*/source.include_exts = py,kv,png,jpg,atlas,db/' buildozer.spec
+          path = Path("buildozer.spec")
+          content = path.read_text()
 
-          sed -i 's/^requirements = .*/requirements = python3,kivy==2.3.1,openpyxl==3.1.5/' buildozer.spec
+          start = content.index("[app]")
+          end = content.find("\n[", start + 1)
 
-          sed -i 's/^orientation = .*/orientation = portrait/' buildozer.spec
+          if end == -1:
+              end = len(content)
 
-          echo 'android.accept_sdk_license = True' >> buildozer.spec
-          echo 'android.api = 33' >> buildozer.spec
-          echo 'android.minapi = 23' >> buildozer.spec
-          echo 'android.archs = arm64-v8a' >> buildozer.spec
-          echo 'android.permissions = READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE' >> buildozer.spec
+          app_section = content[start:end]
+          settings = {
+              "title": "Plant Maintenance Survey",
+              "package.name": "plantsurvey",
+              "package.domain": "org.ruet",
+              "source.include_exts": "py,kv,png,jpg,atlas,db",
+              "requirements": "python3,kivy==2.3.1,openpyxl==3.1.5",
+              "orientation": "portrait",
+              "android.accept_sdk_license": "True",
+              "android.api": "33",
+              "android.minapi": "23",
+              "android.archs": "arm64-v8a",
+          }
+
+          for key, value in settings.items():
+              pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*$"
+              replacement = f"{key} = {value}"
+
+              if re.search(pattern, app_section):
+                  app_section = re.sub(pattern, replacement, app_section, count=1)
+              else:
+                  app_section += f"\n{replacement}"
+
+          content = content[:start] + app_section + content[end:]
+          path.write_text(content)
+
+          print("Buildozer configuration:")
+          print(app_section)
+          PY
+
+      - name: Verify SDK license configuration
+        run: |
+          grep -n "android.accept_sdk_license" buildozer.spec
 
       - name: Build Android APK
         run: |
           buildozer -v android debug
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: plant-survey-apk
