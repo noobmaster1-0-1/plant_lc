@@ -46,60 +46,55 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          import re
 
           path = Path("buildozer.spec")
-          content = path.read_text()
+          lines = path.read_text().splitlines()
 
-          start = content.index("[app]")
-          end = content.find("\n[", start + 1)
+          in_app = False
+          found = False
 
-          if end == -1:
-              end = len(content)
+          for i, line in enumerate(lines):
+              stripped = line.strip()
 
-          section = content[start:end]
+              if stripped.startswith("[") and stripped.endswith("]"):
+                  in_app = (stripped == "[app]")
+                  continue
 
-          settings = {
-              "title": "Plant Maintenance Survey",
-              "package.name": "plantsurvey",
-              "package.domain": "org.ruet",
-              "source.dir": ".",
-              "source.include_exts": "py,kv,png,jpg,atlas,db",
-              "requirements": "python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5",
-              "orientation": "portrait",
-              "android.accept_sdk_license": "True",
-              "android.api": "33",
-              "android.minapi": "24",
-              "android.ndk": "25b",
-              "android.ndk_api": "24",
-              "android.archs": "arm64-v8a",
-              "p4a.branch": "master",
-              "log_level": "2",
-          }
+              if (
+                  in_app
+                  and not stripped.startswith("#")
+                  and stripped.startswith("requirements")
+                  and "=" in stripped
+              ):
+                  lines[i] = (
+                      "requirements = "
+                      "python3==3.10.11,hostpython3==3.10.11,"
+                      "kivy==2.3.1,openpyxl==3.1.5"
+                  )
+                  found = True
+                  break
 
-          for key, value in settings.items():
-              pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*$"
-              replacement = f"{key} = {value}"
+          if not found:
+              raise SystemExit(
+                  "ERROR: Active requirements setting not found in [app]."
+              )
 
-              section, count = re.subn(pattern, replacement, section, count=1)
+          path.write_text("\n".join(lines) + "\n")
 
-              if count == 0:
-                  section += f"\n{replacement}"
-
-          content = content[:start] + section + content[end:]
-          path.write_text(content)
-
-          print("FINAL BUILD CONFIGURATION:")
-          print(section)
-
-          expected = settings["requirements"]
-          if f"requirements = {expected}" not in section:
-              raise SystemExit("ERROR: Python requirements were not configured correctly.")
+          print("Updated buildozer.spec requirements:")
+          for line in lines:
+              stripped = line.strip()
+              if (
+                  stripped.startswith("requirements")
+                  and not stripped.startswith("#")
+              ):
+                  print(stripped)
           PY
 
       - name: Verify Python configuration
         run: |
           echo "Checking buildozer.spec..."
+
           grep -n "^requirements =" buildozer.spec
 
           grep -q "^requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5$" buildozer.spec
@@ -129,7 +124,7 @@ jobs:
           if grep -F -- '--requirements=python3==3.10.11,hostpython3==3.10.11' build.log; then
             echo "Confirmed: Android build used Python 3.10.11."
           else
-            echo "ERROR: Python 3.10.11 was not used in the Android build."
+            echo "ERROR: Python 3.10.11 was not used."
             echo "Do not install any APK from this run."
             exit 1
           fi
