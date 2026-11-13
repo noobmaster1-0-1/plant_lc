@@ -38,21 +38,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer cython==0.29.36
 
-      - name: Initialize Buildozer
+      - name: Generate fresh Buildozer configuration
         run: |
+          rm -f buildozer.spec
           buildozer init
 
       - name: Configure application
         shell: bash
         run: |
+          set -euo pipefail
+
           python - <<'PY'
           from pathlib import Path
 
           path = Path("buildozer.spec")
           lines = path.read_text().splitlines()
-
-          in_app = False
-          found = False
 
           settings = {
               "title": "Plant Maintenance Survey",
@@ -60,7 +60,10 @@ jobs:
               "package.domain": "org.ruet",
               "source.dir": ".",
               "source.include_exts": "py,kv,png,jpg,atlas,db",
-              "requirements": "python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5",
+              "requirements": (
+                  "python3==3.10.11,hostpython3==3.10.11,"
+                  "kivy==2.3.1,openpyxl==3.1.5"
+              ),
               "orientation": "portrait",
               "android.accept_sdk_license": "True",
               "android.api": "33",
@@ -71,6 +74,9 @@ jobs:
               "p4a.branch": "master",
               "log_level": "2",
           }
+
+          in_app = False
+          found = set()
 
           for i, line in enumerate(lines):
               stripped = line.strip()
@@ -86,55 +92,51 @@ jobs:
 
               if key in settings:
                   lines[i] = f"{key} = {settings[key]}"
+                  found.add(key)
 
-                  if key == "requirements":
-                      found = True
+          missing = set(settings) - found
 
-          if not found:
-              raise SystemExit(
-                  "ERROR: Active requirements setting not found in [app]."
-              )
+          if missing:
+              raise SystemExit(f"Missing settings: {sorted(missing)}")
 
           path.write_text("\n".join(lines) + "\n")
 
-          print("Configured buildozer.spec:")
-          for line in lines:
-              if line.strip().startswith("requirements"):
-                  print(line.strip())
+          print("Generated configuration:")
+          print(path.read_text())
           PY
 
-      - name: Verify initial configuration
+      - name: Verify configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          grep -n "^requirements =" buildozer.spec
+          EXPECTED="requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5"
 
-          grep -q "^requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5$" buildozer.spec
+          grep -Fx "$EXPECTED" buildozer.spec
 
-          echo "Initial Python configuration verified."
+          echo "Configuration verified."
 
-      - name: Clean previous Android build
-        run: |
-          buildozer android clean || true
-
-      - name: Force Android Python version
+      - name: Remove all previous Android build caches
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Applying final requirements override..."
+          rm -rf .buildozer
+          rm -rf bin
 
-          sed -i -E \
-            '/^[[:space:]]*requirements[[:space:]]*=/c\requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5' \
-            buildozer.spec
+          echo "Previous Android distributions and build files removed."
 
-          echo "Final buildozer.spec requirements:"
-          grep -n "^requirements =" buildozer.spec
+      - name: Final configuration check
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          grep -q "^requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5$" buildozer.spec
+          echo "Final build configuration:"
+          grep -nE '^(requirements|package.name|p4a.branch|android.api|android.minapi|android.ndk_api) =' buildozer.spec
 
-          echo "Final requirements override verified."
+          grep -q '^requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5$' buildozer.spec
+
+          echo "Ready to build."
 
       - name: Build APK
         shell: bash
@@ -142,22 +144,44 @@ jobs:
           set -o pipefail
           buildozer -v android debug 2>&1 | tee build.log
 
-      - name: Verify actual Android Python version
+      - name: Verify Android Python version
         if: always()
         shell: bash
         run: |
           if [ ! -f build.log ]; then
-            echo "ERROR: Build log not found."
+            echo "Build log missing."
             exit 1
           fi
 
-          echo "Checking actual python-for-android build command..."
-
           if grep -F -- '--requirements=python3==3.10.11,hostpython3==3.10.11' build.log; then
-            echo "SUCCESS: Android build requested Python 3.10.11."
+            echo "Android build requested Python 3.10.11."
           else
             echo "ERROR: Android build did not request Python 3.10.11."
-            echo "Do not install any APK from this run."
+            exit 1
+          fi
+
+      - name: Verify APK Python library
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK=$(find bin -maxdepth 1 -name '*.apk' -print -quit)
+
+          if [ -z "$APK" ]; then
+            echo "APK not found."
+            exit 1
+          fi
+
+          echo "Inspecting APK: $APK"
+
+          unzip -l "$APK" > apk_contents.txt
+
+          if grep -q 'libpython3.10.so' apk_contents.txt; then
+            echo "SUCCESS: Python 3.10 library found."
+          else
+            echo "ERROR: Python 3.10 library not found."
+            grep 'libpython' apk_contents.txt || true
             exit 1
           fi
 
