@@ -81,21 +81,30 @@ jobs:
               pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*$"
               replacement = f"{key} = {value}"
 
-              if re.search(pattern, section):
-                  section = re.sub(pattern, replacement, section, count=1)
-              else:
+              section, count = re.subn(pattern, replacement, section, count=1)
+
+              if count == 0:
                   section += f"\n{replacement}"
 
           content = content[:start] + section + content[end:]
           path.write_text(content)
 
-          print("Configured buildozer.spec:")
+          print("FINAL BUILD CONFIGURATION:")
           print(section)
+
+          expected = settings["requirements"]
+          if f"requirements = {expected}" not in section:
+              raise SystemExit("ERROR: Python requirements were not configured correctly.")
           PY
 
-      - name: Verify configuration
+      - name: Verify Python configuration
         run: |
-          grep -E 'requirements =|p4a.branch|android.accept_sdk_license|android.api =|android.minapi =|android.ndk_api =' buildozer.spec
+          echo "Checking buildozer.spec..."
+          grep -n "^requirements =" buildozer.spec
+
+          grep -q "^requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5$" buildozer.spec
+
+          echo "Python 3.10.11 configuration verified."
 
       - name: Clean previous Android build
         run: |
@@ -106,6 +115,24 @@ jobs:
           set -o pipefail
           buildozer -v android debug 2>&1 | tee build.log
         shell: bash
+
+      - name: Verify actual Android Python version
+        if: always()
+        run: |
+          if [ ! -f build.log ]; then
+            echo "Build log not found."
+            exit 1
+          fi
+
+          echo "Checking actual python-for-android build command..."
+
+          if grep -F -- '--requirements=python3==3.10.11,hostpython3==3.10.11' build.log; then
+            echo "Confirmed: Android build used Python 3.10.11."
+          else
+            echo "ERROR: Python 3.10.11 was not used in the Android build."
+            echo "Do not install any APK from this run."
+            exit 1
+          fi
 
       - name: Upload build log
         if: always()
