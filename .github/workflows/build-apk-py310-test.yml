@@ -43,6 +43,7 @@ jobs:
           buildozer init
 
       - name: Configure application
+        shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -53,26 +54,41 @@ jobs:
           in_app = False
           found = False
 
+          settings = {
+              "title": "Plant Maintenance Survey",
+              "package.name": "plantsurvey",
+              "package.domain": "org.ruet",
+              "source.dir": ".",
+              "source.include_exts": "py,kv,png,jpg,atlas,db",
+              "requirements": "python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5",
+              "orientation": "portrait",
+              "android.accept_sdk_license": "True",
+              "android.api": "33",
+              "android.minapi": "24",
+              "android.ndk": "25b",
+              "android.ndk_api": "24",
+              "android.archs": "arm64-v8a",
+              "p4a.branch": "master",
+              "log_level": "2",
+          }
+
           for i, line in enumerate(lines):
               stripped = line.strip()
 
               if stripped.startswith("[") and stripped.endswith("]"):
-                  in_app = (stripped == "[app]")
+                  in_app = stripped == "[app]"
                   continue
 
-              if (
-                  in_app
-                  and not stripped.startswith("#")
-                  and stripped.startswith("requirements")
-                  and "=" in stripped
-              ):
-                  lines[i] = (
-                      "requirements = "
-                      "python3==3.10.11,hostpython3==3.10.11,"
-                      "kivy==2.3.1,openpyxl==3.1.5"
-                  )
-                  found = True
-                  break
+              if not in_app or stripped.startswith("#") or "=" not in stripped:
+                  continue
+
+              key = stripped.split("=", 1)[0].strip()
+
+              if key in settings:
+                  lines[i] = f"{key} = {settings[key]}"
+
+                  if key == "requirements":
+                      found = True
 
           if not found:
               raise SystemExit(
@@ -81,50 +97,66 @@ jobs:
 
           path.write_text("\n".join(lines) + "\n")
 
-          print("Updated buildozer.spec requirements:")
+          print("Configured buildozer.spec:")
           for line in lines:
-              stripped = line.strip()
-              if (
-                  stripped.startswith("requirements")
-                  and not stripped.startswith("#")
-              ):
-                  print(stripped)
+              if line.strip().startswith("requirements"):
+                  print(line.strip())
           PY
 
-      - name: Verify Python configuration
+      - name: Verify initial configuration
+        shell: bash
         run: |
-          echo "Checking buildozer.spec..."
+          set -euo pipefail
 
           grep -n "^requirements =" buildozer.spec
 
           grep -q "^requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5$" buildozer.spec
 
-          echo "Python 3.10.11 configuration verified."
+          echo "Initial Python configuration verified."
 
       - name: Clean previous Android build
         run: |
           buildozer android clean || true
 
+      - name: Force Android Python version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Applying final requirements override..."
+
+          sed -i -E \
+            '/^[[:space:]]*requirements[[:space:]]*=/c\requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5' \
+            buildozer.spec
+
+          echo "Final buildozer.spec requirements:"
+          grep -n "^requirements =" buildozer.spec
+
+          grep -q "^requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5$" buildozer.spec
+
+          echo "Final requirements override verified."
+
       - name: Build APK
+        shell: bash
         run: |
           set -o pipefail
           buildozer -v android debug 2>&1 | tee build.log
-        shell: bash
 
       - name: Verify actual Android Python version
         if: always()
+        shell: bash
         run: |
           if [ ! -f build.log ]; then
-            echo "Build log not found."
+            echo "ERROR: Build log not found."
             exit 1
           fi
 
           echo "Checking actual python-for-android build command..."
 
           if grep -F -- '--requirements=python3==3.10.11,hostpython3==3.10.11' build.log; then
-            echo "Confirmed: Android build used Python 3.10.11."
+            echo "SUCCESS: Android build requested Python 3.10.11."
           else
-            echo "ERROR: Python 3.10.11 was not used."
+            echo "ERROR: Android build did not request Python 3.10.11."
             echo "Do not install any APK from this run."
             exit 1
           fi
