@@ -43,6 +43,119 @@ jobs:
           rm -f buildozer.spec
           buildozer init
 
+      - name: Download python-for-android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone \
+            --depth 1 \
+            --branch master \
+            https://github.com/kivy/python-for-android.git \
+            "$GITHUB_WORKSPACE/python-for-android"
+
+          echo "python-for-android commit:"
+          git -C "$GITHUB_WORKSPACE/python-for-android" rev-parse HEAD
+
+      - name: Patch Android Python startup paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          START_C="$GITHUB_WORKSPACE/python-for-android/pythonforandroid/bootstraps/common/build/jni/application/src/start.c"
+
+          if [ ! -f "$START_C" ]; then
+            echo "ERROR: start.c not found."
+            exit 1
+          fi
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              "python-for-android/pythonforandroid/bootstraps/"
+              "common/build/jni/application/src/start.c"
+          )
+
+          source = path.read_text()
+
+          old = """            wchar_t wchar_zip_path[256];
+            wchar_t wchar_modules_path[256];
+            swprintf(wchar_zip_path, 256, L"%s/stdlib.zip", python_bundle_dir);
+            swprintf(wchar_modules_path, 256, L"%s/modules", python_bundle_dir);
+            config.module_search_paths_set = 1;
+            PyWideStringList_Append(&config.module_search_paths, wchar_zip_path);
+            PyWideStringList_Append(&config.module_search_paths, wchar_modules_path);"""
+
+          new = """            char zip_path[256];
+            char modules_path[256];
+
+            snprintf(zip_path, sizeof(zip_path),
+                     "%s/stdlib.zip", python_bundle_dir);
+            snprintf(modules_path, sizeof(modules_path),
+                     "%s/modules", python_bundle_dir);
+
+            wchar_t *wchar_zip_path = Py_DecodeLocale(zip_path, NULL);
+            wchar_t *wchar_modules_path = Py_DecodeLocale(modules_path, NULL);
+
+            if (wchar_zip_path == NULL || wchar_modules_path == NULL) {
+                LOGP("ERROR: Failed to decode Python bundle paths.");
+
+                if (wchar_zip_path != NULL) {
+                    PyMem_RawFree(wchar_zip_path);
+                }
+
+                if (wchar_modules_path != NULL) {
+                    PyMem_RawFree(wchar_modules_path);
+                }
+
+                PyConfig_Clear(&config);
+                return -1;
+            }
+
+            config.module_search_paths_set = 1;
+
+            PyStatus zip_status = PyWideStringList_Append(
+                &config.module_search_paths, wchar_zip_path);
+
+            PyStatus modules_status = PyWideStringList_Append(
+                &config.module_search_paths, wchar_modules_path);
+
+            PyMem_RawFree(wchar_zip_path);
+            PyMem_RawFree(wchar_modules_path);
+
+            if (PyStatus_Exception(zip_status) ||
+                PyStatus_Exception(modules_status)) {
+                LOGP("ERROR: Failed to configure Python module search paths.");
+                PyConfig_Clear(&config);
+                return -1;
+            }"""
+
+          if old not in source:
+              raise SystemExit(
+                  "ERROR: Original startup code did not match. "
+                  "No patch was applied."
+              )
+
+          source = source.replace(old, new, 1)
+          path.write_text(source)
+
+          print("Startup path patch applied.")
+          PY
+
+          echo "Verifying patched source..."
+
+          if grep -F 'swprintf(wchar_zip_path' "$START_C"; then
+            echo "ERROR: Original unsafe code remains."
+            exit 1
+          fi
+
+          grep -F 'Py_DecodeLocale(zip_path' "$START_C"
+          grep -F 'Py_DecodeLocale(modules_path' "$START_C"
+          grep -F 'Failed to decode Python bundle paths.' "$START_C"
+
+          echo "PATCH VERIFIED."
+
       - name: Configure application
         shell: bash
         run: |
@@ -72,6 +185,9 @@ jobs:
               "android.ndk_api": "24",
               "android.archs": "arm64-v8a",
               "p4a.branch": "master",
+              "p4a.source_dir": str(
+                  (Path.cwd() / "python-for-android").resolve()
+              ),
               "log_level": "2",
           }
 
@@ -105,16 +221,30 @@ jobs:
           print(path.read_text())
           PY
 
-      - name: Verify configuration
+      - name: Verify Buildozer uses patched source
         shell: bash
         run: |
           set -euo pipefail
 
-          EXPECTED="requirements = python3==3.12.9,hostpython3==3.12.9,kivy==2.3.1,openpyxl==3.1.5"
+          EXPECTED_DIR="$(realpath python-for-android)"
+          CONFIGURED_DIR="$(sed -n 's/^p4a.source_dir = //p' buildozer.spec | tail -n 1)"
 
-          grep -Fx "$EXPECTED" buildozer.spec
+          echo "Expected source: $EXPECTED_DIR"
+          echo "Configured source: $CONFIGURED_DIR"
 
-          echo "Python 3.12.9 configuration verified."
+          test "$EXPECTED_DIR" = "$CONFIGURED_DIR"
+          test -f "$CONFIGURED_DIR/pythonforandroid/bootstraps/common/build/jni/application/src/start.c"
+
+          grep -F 'Py_DecodeLocale(zip_path' \
+            "$CONFIGURED_DIR/pythonforandroid/bootstraps/common/build/jni/application/src/start.c"
+
+          if grep -F 'swprintf(wchar_zip_path' \
+            "$CONFIGURED_DIR/pythonforandroid/bootstraps/common/build/jni/application/src/start.c"; then
+            echo "ERROR: Unpatched source selected."
+            exit 1
+          fi
+
+          echo "Buildozer source directory verified."
 
       - name: Remove previous Android build files
         shell: bash
@@ -124,107 +254,8 @@ jobs:
           rm -rf .buildozer
           rm -rf bin
 
-          mkdir -p .buildozer/android/platform
-
-          echo "Clean build directories prepared."
-
-      - name: Download and patch python-for-android
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          P4A_DIR=".buildozer/android/platform/python-for-android"
-
-          git clone \
-            --depth 1 \
-            --branch master \
-            https://github.com/kivy/python-for-android.git \
-            "$P4A_DIR"
-
-          START_C="$P4A_DIR/pythonforandroid/bootstraps/common/build/jni/application/src/start.c"
-
-          if [ ! -f "$START_C" ]; then
-            echo "ERROR: python-for-android start.c was not found."
-            exit 1
-          fi
-
-          echo "python-for-android commit:"
-          git -C "$P4A_DIR" rev-parse HEAD
-
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path(
-              ".buildozer/android/platform/python-for-android/"
-              "pythonforandroid/bootstraps/common/build/jni/"
-              "application/src/start.c"
-          )
-
-          source = path.read_text()
-
-          old = """            wchar_t wchar_zip_path[256];
-            wchar_t wchar_modules_path[256];
-            swprintf(wchar_zip_path, 256, L"%s/stdlib.zip", python_bundle_dir);
-            swprintf(wchar_modules_path, 256, L"%s/modules", python_bundle_dir);
-            config.module_search_paths_set = 1;
-            PyWideStringList_Append(&config.module_search_paths, wchar_zip_path);
-            PyWideStringList_Append(&config.module_search_paths, wchar_modules_path);"""
-
-          new = """            char zip_path[256];
-            char modules_path[256];
-
-            snprintf(zip_path, sizeof(zip_path),
-                     "%s/stdlib.zip", python_bundle_dir);
-            snprintf(modules_path, sizeof(modules_path),
-                     "%s/modules", python_bundle_dir);
-
-            wchar_t *wchar_zip_path = Py_DecodeLocale(zip_path, NULL);
-            wchar_t *wchar_modules_path = Py_DecodeLocale(modules_path, NULL);
-
-            if (wchar_zip_path == NULL || wchar_modules_path == NULL) {
-                LOGP("ERROR: Failed to decode Python bundle paths.");
-                if (wchar_zip_path != NULL) {
-                    PyMem_RawFree(wchar_zip_path);
-                }
-                if (wchar_modules_path != NULL) {
-                    PyMem_RawFree(wchar_modules_path);
-                }
-            } else {
-                config.module_search_paths_set = 1;
-
-                PyWideStringList_Append(
-                    &config.module_search_paths, wchar_zip_path);
-                PyWideStringList_Append(
-                    &config.module_search_paths, wchar_modules_path);
-
-                PyMem_RawFree(wchar_zip_path);
-                PyMem_RawFree(wchar_modules_path);
-            }"""
-
-          if old not in source:
-              raise SystemExit(
-                  "ERROR: Expected original path-construction code "
-                  "was not found. Refusing to build with an unpatched "
-                  "python-for-android source."
-              )
-
-          source = source.replace(old, new, 1)
-          path.write_text(source)
-
-          print("Patched start.c successfully.")
-          PY
-
-          echo "Verifying patched source..."
-
-          if grep -n 'swprintf(wchar_zip_path' "$START_C"; then
-            echo "ERROR: Original unsafe path code remains."
-            exit 1
-          fi
-
-          grep -n 'Py_DecodeLocale(zip_path' "$START_C"
-          grep -n 'Py_DecodeLocale(modules_path' "$START_C"
-
-          echo "python-for-android startup path patch verified."
+          echo "Clean Android build directories prepared."
+          echo "Patched python-for-android checkout preserved."
 
       - name: Final configuration check
         shell: bash
@@ -232,7 +263,7 @@ jobs:
           set -euo pipefail
 
           echo "Final build configuration:"
-          grep -nE '^(requirements|package.name|p4a.branch|android.api|android.minapi|android.ndk_api) =' buildozer.spec
+          grep -nE '^(requirements|package.name|p4a.branch|p4a.source_dir|android.api|android.minapi|android.ndk_api) =' buildozer.spec
 
           grep -q '^requirements = python3==3.12.9,hostpython3==3.12.9,kivy==2.3.1,openpyxl==3.1.5$' buildozer.spec
 
@@ -248,6 +279,8 @@ jobs:
         if: always()
         shell: bash
         run: |
+          set -euo pipefail
+
           if [ ! -f build.log ]; then
             echo "Build log missing."
             exit 1
@@ -260,7 +293,7 @@ jobs:
             exit 1
           fi
 
-      - name: Verify APK and patched startup code
+      - name: Verify compiled APK contains startup patch
         if: success()
         shell: bash
         run: |
@@ -269,7 +302,7 @@ jobs:
           APK=$(find bin -maxdepth 1 -name '*.apk' -print -quit)
 
           if [ -z "$APK" ]; then
-            echo "APK not found."
+            echo "ERROR: APK not found."
             exit 1
           fi
 
@@ -277,26 +310,25 @@ jobs:
 
           unzip -l "$APK" > apk_contents.txt
 
-          if grep -q 'libpython3.12.so' apk_contents.txt; then
-            echo "SUCCESS: Python 3.12 library found."
+          grep -q 'libpython3.12.so' apk_contents.txt
+          grep -q 'libmain.so' apk_contents.txt
+
+          unzip -p "$APK" lib/arm64-v8a/libmain.so > libmain.so
+
+          if strings libmain.so | grep -F 'Failed to decode Python bundle paths.'; then
+            echo "SUCCESS: Patched startup code is inside the APK."
           else
-            echo "ERROR: Python 3.12 library not found."
-            grep 'libpython' apk_contents.txt || true
+            echo "ERROR: Patch marker missing from compiled libmain.so."
             exit 1
           fi
 
-          if grep -q 'libmain.so' apk_contents.txt; then
-            echo "SUCCESS: Android bootstrap library found."
-          else
-            echo "ERROR: libmain.so not found."
-            exit 1
-          fi
+          echo "APK verification completed."
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-build-log-path-fix
+          name: android-build-log-startup-fix
           path: build.log
           if-no-files-found: ignore
 
@@ -304,6 +336,6 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: plant-survey-apk-path-fix
+          name: plant-survey-apk-startup-fix
           path: bin/*.apk
           if-no-files-found: error
