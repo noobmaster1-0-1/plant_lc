@@ -1,5 +1,5 @@
 
-name: Test APK - Python 3.10
+name: Build APK - Python 3.12 Startup Fix
 
 on:
   workflow_dispatch:
@@ -61,7 +61,7 @@ jobs:
               "source.dir": ".",
               "source.include_exts": "py,kv,png,jpg,atlas,db",
               "requirements": (
-                  "python3==3.10.11,hostpython3==3.10.11,"
+                  "python3==3.12.9,hostpython3==3.12.9,"
                   "kivy==2.3.1,openpyxl==3.1.5"
               ),
               "orientation": "portrait",
@@ -110,13 +110,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          EXPECTED="requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5"
+          EXPECTED="requirements = python3==3.12.9,hostpython3==3.12.9,kivy==2.3.1,openpyxl==3.1.5"
 
           grep -Fx "$EXPECTED" buildozer.spec
 
-          echo "Configuration verified."
+          echo "Python 3.12.9 configuration verified."
 
-      - name: Remove all previous Android build caches
+      - name: Remove previous Android build files
         shell: bash
         run: |
           set -euo pipefail
@@ -124,7 +124,107 @@ jobs:
           rm -rf .buildozer
           rm -rf bin
 
-          echo "Previous Android distributions and build files removed."
+          mkdir -p .buildozer/android/platform
+
+          echo "Clean build directories prepared."
+
+      - name: Download and patch python-for-android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          P4A_DIR=".buildozer/android/platform/python-for-android"
+
+          git clone \
+            --depth 1 \
+            --branch master \
+            https://github.com/kivy/python-for-android.git \
+            "$P4A_DIR"
+
+          START_C="$P4A_DIR/pythonforandroid/bootstraps/common/build/jni/application/src/start.c"
+
+          if [ ! -f "$START_C" ]; then
+            echo "ERROR: python-for-android start.c was not found."
+            exit 1
+          fi
+
+          echo "python-for-android commit:"
+          git -C "$P4A_DIR" rev-parse HEAD
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              ".buildozer/android/platform/python-for-android/"
+              "pythonforandroid/bootstraps/common/build/jni/"
+              "application/src/start.c"
+          )
+
+          source = path.read_text()
+
+          old = """            wchar_t wchar_zip_path[256];
+            wchar_t wchar_modules_path[256];
+            swprintf(wchar_zip_path, 256, L"%s/stdlib.zip", python_bundle_dir);
+            swprintf(wchar_modules_path, 256, L"%s/modules", python_bundle_dir);
+            config.module_search_paths_set = 1;
+            PyWideStringList_Append(&config.module_search_paths, wchar_zip_path);
+            PyWideStringList_Append(&config.module_search_paths, wchar_modules_path);"""
+
+          new = """            char zip_path[256];
+            char modules_path[256];
+
+            snprintf(zip_path, sizeof(zip_path),
+                     "%s/stdlib.zip", python_bundle_dir);
+            snprintf(modules_path, sizeof(modules_path),
+                     "%s/modules", python_bundle_dir);
+
+            wchar_t *wchar_zip_path = Py_DecodeLocale(zip_path, NULL);
+            wchar_t *wchar_modules_path = Py_DecodeLocale(modules_path, NULL);
+
+            if (wchar_zip_path == NULL || wchar_modules_path == NULL) {
+                LOGP("ERROR: Failed to decode Python bundle paths.");
+                if (wchar_zip_path != NULL) {
+                    PyMem_RawFree(wchar_zip_path);
+                }
+                if (wchar_modules_path != NULL) {
+                    PyMem_RawFree(wchar_modules_path);
+                }
+            } else {
+                config.module_search_paths_set = 1;
+
+                PyWideStringList_Append(
+                    &config.module_search_paths, wchar_zip_path);
+                PyWideStringList_Append(
+                    &config.module_search_paths, wchar_modules_path);
+
+                PyMem_RawFree(wchar_zip_path);
+                PyMem_RawFree(wchar_modules_path);
+            }"""
+
+          if old not in source:
+              raise SystemExit(
+                  "ERROR: Expected original path-construction code "
+                  "was not found. Refusing to build with an unpatched "
+                  "python-for-android source."
+              )
+
+          source = source.replace(old, new, 1)
+          path.write_text(source)
+
+          print("Patched start.c successfully.")
+          PY
+
+          echo "Verifying patched source..."
+
+          if grep -n 'swprintf(wchar_zip_path' "$START_C"; then
+            echo "ERROR: Original unsafe path code remains."
+            exit 1
+          fi
+
+          grep -n 'Py_DecodeLocale(zip_path' "$START_C"
+          grep -n 'Py_DecodeLocale(modules_path' "$START_C"
+
+          echo "python-for-android startup path patch verified."
 
       - name: Final configuration check
         shell: bash
@@ -134,7 +234,7 @@ jobs:
           echo "Final build configuration:"
           grep -nE '^(requirements|package.name|p4a.branch|android.api|android.minapi|android.ndk_api) =' buildozer.spec
 
-          grep -q '^requirements = python3==3.10.11,hostpython3==3.10.11,kivy==2.3.1,openpyxl==3.1.5$' buildozer.spec
+          grep -q '^requirements = python3==3.12.9,hostpython3==3.12.9,kivy==2.3.1,openpyxl==3.1.5$' buildozer.spec
 
           echo "Ready to build."
 
@@ -153,14 +253,14 @@ jobs:
             exit 1
           fi
 
-          if grep -F -- '--requirements=python3==3.10.11,hostpython3==3.10.11' build.log; then
-            echo "Android build requested Python 3.10.11."
+          if grep -F -- '--requirements=python3==3.12.9,hostpython3==3.12.9' build.log; then
+            echo "Android build requested Python 3.12.9."
           else
-            echo "ERROR: Android build did not request Python 3.10.11."
+            echo "ERROR: Android build did not request Python 3.12.9."
             exit 1
           fi
 
-      - name: Verify APK Python library
+      - name: Verify APK and patched startup code
         if: success()
         shell: bash
         run: |
@@ -177,11 +277,18 @@ jobs:
 
           unzip -l "$APK" > apk_contents.txt
 
-          if grep -q 'libpython3.10.so' apk_contents.txt; then
-            echo "SUCCESS: Python 3.10 library found."
+          if grep -q 'libpython3.12.so' apk_contents.txt; then
+            echo "SUCCESS: Python 3.12 library found."
           else
-            echo "ERROR: Python 3.10 library not found."
+            echo "ERROR: Python 3.12 library not found."
             grep 'libpython' apk_contents.txt || true
+            exit 1
+          fi
+
+          if grep -q 'libmain.so' apk_contents.txt; then
+            echo "SUCCESS: Android bootstrap library found."
+          else
+            echo "ERROR: libmain.so not found."
             exit 1
           fi
 
@@ -189,7 +296,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-build-log-py310-test
+          name: android-build-log-path-fix
           path: build.log
           if-no-files-found: ignore
 
@@ -197,6 +304,6 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: plant-survey-apk-py310-test
+          name: plant-survey-apk-path-fix
           path: bin/*.apk
           if-no-files-found: error
